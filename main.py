@@ -1,68 +1,155 @@
-import os
 import logging
-from aiogram import Bot, Dispatcher, types, executor
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher.filters.builtin import Command
 import sqlite3
+import os
+from aiogram import Bot, Dispatcher, executor, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
-# --- Konfiguratsiya ---
-API_TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_ID = os.environ.get('ADMIN_ID') # Bot monitoring xabarlarini yuboradigan admin ID si
+# --- SOZLAMALAR ---
+# Railway Environment Variables dan o'qib oladi
+API_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")  # Sizning ID raqamingiz (string ko'rinishida kelishi mumkin)
 
-# Logging sozlamalari
+# Loglarni yoqish
 logging.basicConfig(level=logging.INFO)
 
-# Bot va Dispatcher obyektlarini yaratish
+# Bot va Dispatcher
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# --- Ma'lumotlar bazasi (DB) ---
-DB_NAME = 'monitor_words.db'
-
-def init_db():
-    """Ma'lumotlar bazasini va 'words' jadvalini yaratadi."""
-    conn = sqlite3.connect(DB_NAME)
+# --- BAZA BILAN ISHLASH (SQLite) ---
+def db_connect():
+    conn = sqlite3.connect("words.db")
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS words (
-            id INTEGER PRIMARY KEY,
-            word TEXT UNIQUE NOT NULL
+        CREATE TABLE IF NOT EXISTS bad_words (
+            word TEXT PRIMARY KEY
         )
     """)
     conn.commit()
-    conn.close()
+    return conn
 
-def add_word_to_db(word):
-    """Yangi so'zni ma'lumotlar bazasiga qo'shadi."""
-    conn = sqlite3.connect(DB_NAME)
+def add_word(word):
+    conn = db_connect()
     cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO words (word) VALUES (?)", (word.lower(),))
+        cursor.execute("INSERT INTO bad_words (word) VALUES (?)", (word.lower(),))
         conn.commit()
-        return True
+        status = True
     except sqlite3.IntegrityError:
-        return False  # So'z allaqachon mavjud
-    finally:
-        conn.close()
+        status = False
+    conn.close()
+    return status
 
-def get_all_words():
-    """Barcha maxsus so'zlarni oladi."""
-    conn = sqlite3.connect(DB_NAME)
+def get_words():
+    conn = db_connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT word FROM words")
+    cursor.execute("SELECT word FROM bad_words")
     words = [row[0] for row in cursor.fetchall()]
     conn.close()
     return words
 
-def remove_word_from_db(word):
-    """So'zni ma'lumotlar bazasidan o'chiradi."""
-    conn = sqlite3.connect(DB_NAME)
+def delete_word(word):
+    conn = db_connect()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM words WHERE word = ?", (word.lower(),))
-    deleted_count = cursor.rowcount
+    cursor.execute("DELETE FROM bad_words WHERE word = ?", (word.lower(),))
     conn.commit()
     conn.close()
-    return deleted_count > 0
+
+# --- ADMIN BUYRUQLARI ---
+
+@dp.message_handler(commands=['start', 'help'])
+async def send_welcome(message: types.Message):
+    await message.reply("Salom! Men guruhdagi so'zlarni nazorat qiluvchi botman.\n"
+                        "Buyruqlar (faqat admin uchun):\n"
+                        "/add <so'z> - So'z qo'shish\n"
+                        "/del <so'z> - So'zni o'chirish\n"
+                        "/list - Ro'yxatni ko'rish")
+
+@dp.message_handler(commands=['add'])
+async def add_new_word(message: types.Message):
+    # Faqat admin ishlata olsin
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+
+    args = message.get_args()
+    if not args:
+        await message.reply("So'zni kiriting. Masalan: /add non")
+        return
+
+    word = args.lower().strip()
+    if add_word(word):
+        await message.reply(f"✅ '{word}' so'zi nazorat ro'yxatiga qo'shildi.")
+    else:
+        await message.reply(f"⚠️ '{word}' so'zi allaqachon mavjud.")
+
+@dp.message_handler(commands=['del'])
+async def remove_existing_word(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+
+    args = message.get_args()
+    if not args:
+        await message.reply("O'chirish uchun so'z kiriting. Masalan: /del non")
+        return
+
+    word = args.lower().strip()
+    delete_word(word)
+    await message.reply(f"🗑 '{word}' so'zi ro'yxatdan o'chirildi.")
+
+@dp.message_handler(commands=['list'])
+async def list_all_words(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+
+    words = get_words()
+    if words:
+        text = "📋 **Nazoratdagi so'zlar:**\n\n" + "\n".join(words)
+    else:
+        text = "Ro'yxat bo'sh."
+    await message.reply(text, parse_mode="Markdown")
+
+# --- GURUH XABARLARINI TEKSHIRISH ---
+
+@dp.message_handler(content_types=['text'])
+async def check_messages(message: types.Message):
+    # Agar xabar guruhdan bo'lsa
+    if message.chat.type in ['group', 'supergroup']:
+        text = message.text.lower()
+        words = get_words()
+        
+        found_word = None
+        for word in words:
+            # Oddiy qidiruv (so'z ichida bo'lsa ham topadi)
+            if word in text:
+                found_word = word
+                break
+        
+        if found_word:
+            user = message.from_user
+            chat = message.chat
+            
+            # Xabar linkini yasash (superguruhlar uchun)
+            msg_link = f"https://t.me/c/{str(chat.id)[4:]}/{message.message_id}"
+            
+            report = (
+                f"🚨 **Diqqat! Taqiqlangan so'z topildi.**\n\n"
+                f"🗝 **So'z:** {found_word}\n"
+                f"👤 **Foydalanuvchi:** {user.full_name}\n"
+                f"🆔 **ID:** `{user.id}`\n"
+                f"📧 **Username:** @{user.username if user.username else 'Yo\'q'}\n"
+                f"📍 **Guruh:** {chat.title}\n\n"
+                f"📄 **Xabar matni:**\n{message.text}\n\n"
+                f"🔗 [Xabarga o'tish]({msg_link})"
+            )
+            
+            # Adminga xabar yuborish
+            try:
+                await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="Markdown")
+            except Exception as e:
+                print(f"Adminga yuborishda xatolik: {e}")
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
 
 # --- Admin Buyruqlari (Guruhda) ---
 
