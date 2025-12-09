@@ -1,385 +1,193 @@
-import logging
-import sqlite3
 import os
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
+import json
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart, Command
+from aiogram.types import Message
+from aiogram.utils.markdown import hbold, hcode
 
-# --- KONFIGURATSIYA ---
-# Railway Environment Variables dan o'qib oladi
-# BOT_TOKEN va ADMIN_ID ni Railway'da o'rnatish shart!
-API_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID") 
+# Logging sozlamalari
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Loglarni yoqish
-logging.basicConfig(level=logging.INFO)
+# Faylga asoslangan kalit so'zlarni saqlash
+KEYWORDS_FILE = "keywords.json"
 
-# Bot va Dispatcher
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot, storage=MemoryStorage())
+def load_keywords():
+    """Kalit so'zlarni fayldan yuklaydi."""
+    if os.path.exists(KEYWORDS_FILE):
+        with open(KEYWORDS_FILE, 'r', encoding='utf-8') as f:
+            try:
+                return set(json.load(f))
+            except json.JSONDecodeError:
+                return set()
+    return set()
 
-# --- MA'LUMOTLAR BAZASI (SQLite) ---
+def save_keywords(keywords):
+    """Kalit so'zlarni faylga saqlaydi."""
+    with open(KEYWORDS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(list(keywords), f, ensure_ascii=False, indent=4)
 
-def db_connect():
-    """DB bilan ulanishni o'rnatadi va jadvalni yaratadi."""
-    conn = sqlite3.connect("words.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bad_words (
-            word TEXT PRIMARY KEY
-        )
-    """)
-    conn.commit()
-    return conn
+# Global kalit so'zlar to'plami
+MONITORED_KEYWORDS = load_keywords()
 
-def add_word(word):
-    """Yangi so'zni bazaga qo'shadi."""
-    conn = db_connect()
-    cursor = conn.cursor()
+# Environment o'zgaruvchilari
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID") # Adminning chat IDsi (integer)
+
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN environment o'zgaruvchisi topilmadi.")
+    exit(1)
+if not ADMIN_ID:
+    logger.warning("ADMIN_ID environment o'zgaruvchisi topilmadi. Admin buyruqlari ishlamasligi mumkin.")
+    ADMIN_ID = None
+else:
     try:
-        cursor.execute("INSERT INTO bad_words (word) VALUES (?)", (word.lower(),))
-        conn.commit()
-        status = True
-    except sqlite3.IntegrityError:
-        status = False # So'z allaqachon mavjud
-    conn.close()
-    return status
+        ADMIN_ID = int(ADMIN_ID)
+    except ValueError:
+        logger.error("ADMIN_ID noto'g'ri formatda. Integer bo'lishi kerak.")
+        exit(1)
 
-def get_words():
-    """Barcha nazorat so'zlarini oladi."""
-    conn = db_connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT word FROM bad_words")
-    words = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return words
+# --- Handlerlar ---
 
-def delete_word(word):
-    """So'zni bazadan o'chiradi."""
-    conn = db_connect()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM bad_words WHERE word = ?", (word.lower(),))
-    deleted_count = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return deleted_count > 0
+async def is_admin(message: Message) -> bool:
+    """Xabar yuboruvchining admin ekanligini tekshiradi."""
+    if ADMIN_ID is None:
+        return False
+    return message.from_user.id == ADMIN_ID
 
-# --- ADMIN BUYRUQLARI ---
+@dp.message(CommandStart())
+async def command_start_handler(message: Message) -> None:
+    """/start buyrug'iga javob beradi."""
+    await message.answer(f"Salom, {hbold(message.from_user.full_name)}! Men guruhlarda maxsus so'zlarni kuzatuvchi botman.")
+    if await is_admin(message):
+        await message.answer("Siz adminsiz. Kalit so'zlarni boshqarish uchun /add_word, /remove_word, /list_words buyruqlaridan foydalanishingiz mumkin.")
 
-@dp.message_handler(commands=['start', 'help'])
-async def send_welcome(message: types.Message):
-    await message.reply("Salom! Men guruhdagi so'zlarni nazorat qiluvchi botman. \n"
-                        "Buyruqlar (faqat admin ID si uchun):\n"
-                        "/add <so'z> - So'z qo'shish\n"
-                        "/del <so'z> - So'zni o'chirish\n"
-                        "/list - Ro'yxatni ko'rish")
+@dp.message(Command("add_word"))
+async def add_word_handler(message: Message) -> None:
+    """Kalit so'z qo'shish buyrug'i."""
+    if not await is_admin(message):
+        return await message.answer("Sizda bu buyruqni ishlatishga ruxsat yo'q.")
 
-@dp.message_handler(commands=['add'])
-async def add_new_word(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID):
-        return
-    args = message.get_args()
-    if not args:
-        await message.reply("Qo'shiladigan so'zni kiriting. Masalan: `/add non`")
-        return
-    word = args.lower().strip()
-    if add_word(word):
-        await message.reply(f"✅ **'{word}'** so'zi nazorat ro'yxatiga qo'shildi.")
-    else:
-        await message.reply(f"⚠️ **'{word}'** so'zi allaqachon mavjud.")
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("Foydalanish: /add_word <so'z>")
 
-@dp.message_handler(commands=['del'])
-async def remove_existing_word(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID):
-        return
-    args = message.get_args()
-    if not args:
-        await message.reply("O'chirish uchun so'z kiriting. Masalan: `/del non`")
-        return
-    word = args.lower().strip()
-    if delete_word(word):
-        await message.reply(f"🗑 **'{word}'** so'zi ro'yxatdan o'chirildi.")
-    else:
-        await message.reply(f"❌ **'{word}'** so'zi ro'yxatda topilmadi.")
+    word = args[1].strip().lower()
+    if not word:
+        return await message.answer("So'z bo'sh bo'lishi mumkin emas.")
 
-@dp.message_handler(commands=['list'])
-async def list_all_words(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID):
-        return
-    words = get_words()
-    if words:
-        word_list = "\n".join([f"• {w}" for w in words])
-        text = f"📋 **Nazoratdagi so'zlar:**\n\n{word_list}"
-    else:
-        text = "Ro'yxat bo'sh. Hech qanday so'z nazorat qilinmayapti."
-    await message.reply(text, parse_mode="Markdown")
+    if word in MONITORED_KEYWORDS:
+        return await message.answer(f"'{word}' so'zi allaqachon ro'yxatda mavjud.")
 
-# --- XABARLARNI KUZATISH MANTIQI (TUZAILGAN QISM) ---
+    MONITORED_KEYWORDS.add(word)
+    save_keywords(MONITORED_KEYWORDS)
+    await message.answer(f"'{word}' so'zi muvaffaqiyatli qo'shildi.")
+    logger.info(f"Admin {message.from_user.id} tomonidan '{word}' so'zi qo'shildi.")
 
-@dp.message_handler(content_types=['text'])
-async def check_messages(message: types.Message):
-    if message.chat.type in ['group', 'supergroup']:
-        text = message.text.lower()
-        words = get_words()
-        
-        found_words = [word for word in words if word in text]
-        
-        if found_words:
-            user = message.from_user
-            chat = message.chat
-            
-            # Xatolikni bartaraf etish uchun username ni alohida aniqlash
-            username_text = f"@{user.username}" if user.username else "Mavjud emas"
-            
-            # Xabar linkini yasash (superguruhlar uchun)
-            # chat.id manfiy son bo'ladi, boshidagi "-100" qismini olib tashlash kerak
-            msg_link = f"https://t.me/c/{str(chat.id)[4:]}/{message.message_id}"
-            
-            report = (
-                f"🚨 **Diqqat! Taqiqlangan so'z topildi.** 🚨\n\n"
-                f"🗝 **Topilgan so'z(lar):** {', '.join(found_words)}\n"
-                f"👤 **Foydalanuvchi:** [{user.full_name}](tg://user?id={user.id})\n"
-                f"🆔 **ID:** `{user.id}`\n"
-                f"📧 **Username:** {username_text}\n"
-                f"📍 **Guruh:** {chat.title}\n\n"
-                f"📄 **Xabar matni:**\n`{message.text}`\n\n"
-                f"🔗 [Original xabarga o'tish]({msg_link})"
-            )
-            
-            try:
-                # Adminga xabar yuborish
-                await bot.send_message(
-                    chat_id=ADMIN_ID, 
-                    text=report, 
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True
-                )
-            except Exception as e:
-                logging.error(f"Adminga xabar yuborishda xatolik: {e}")
+@dp.message(Command("remove_word"))
+async def remove_word_handler(message: Message) -> None:
+    """Kalit so'zni olib tashlash buyrug'i."""
+    if not await is_admin(message):
+        return await message.answer("Sizda bu buyruqni ishlatishga ruxsat yo'q.")
 
-if __name__ == '__main__':
-    if not API_TOKEN or not ADMIN_ID:
-        logging.error("BOT_TOKEN va ADMIN_ID muhit o'zgaruvchilari Railway'da o'rnatilmagan.")
-    else:
-        db_connect() # Baza ishga tushirildi
-        logging.info("Bot ishga tushirildi.")
-        executor.start_polling(dp, skip_updates=True)
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        return await message.answer("Foydalanish: /remove_word <so'z>")
 
-                        "/list - Ro'yxatni ko'rish")
+    word = args[1].strip().lower()
+    if word not in MONITORED_KEYWORDS:
+        return await message.answer(f"'{word}' so'zi ro'yxatda mavjud emas.")
 
-@dp.message_handler(commands=['add'])
-async def add_new_word(message: types.Message):
-    # Faqat admin ishlata olsin
-    if str(message.from_user.id) != str(ADMIN_ID):
+    MONITORED_KEYWORDS.remove(word)
+    save_keywords(MONITORED_KEYWORDS)
+    await message.answer(f"'{word}' so'zi muvaffaqiyatli olib tashlandi.")
+    logger.info(f"Admin {message.from_user.id} tomonidan '{word}' so'zi olib tashlandi.")
+
+@dp.message(Command("list_words"))
+async def list_words_handler(message: Message) -> None:
+    """Kalit so'zlar ro'yxatini ko'rsatish buyrug'i."""
+    if not await is_admin(message):
+        return await message.answer("Sizda bu buyruqni ishlatishga ruxsat yo'q.")
+
+    if not MONITORED_KEYWORDS:
+        return await message.answer("Kuzatilayotgan kalit so'zlar mavjud emas.")
+
+    words_list = "\n".join(sorted(list(MONITORED_KEYWORDS)))
+    await message.answer(f"{hbold('Kuzatilayotgan kalit so\'zlar:')}\n{hcode(words_list)}")
+
+@dp.message(F.text | F.caption)
+async def monitor_messages(message: Message, bot: Bot) -> None:
+    """Guruh xabarlarini kuzatish va kalit so'z topilsa adminga xabar berish."""
+    if not MONITORED_KEYWORDS:
+        return # Kalit so'zlar bo'lmasa, tekshirish shart emas
+
+    # Faqat guruh yoki superguruhlarda ishlaymiz
+    if message.chat.type not in ["group", "supergroup"]:
         return
 
-    args = message.get_args()
-    if not args:
-        await message.reply("So'zni kiriting. Masalan: /add non")
-        return
-
-    word = args.lower().strip()
-    if add_word(word):
-        await message.reply(f"✅ '{word}' so'zi nazorat ro'yxatiga qo'shildi.")
-    else:
-        await message.reply(f"⚠️ '{word}' so'zi allaqachon mavjud.")
-
-@dp.message_handler(commands=['del'])
-async def remove_existing_word(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID):
-        return
-
-    args = message.get_args()
-    if not args:
-        await message.reply("O'chirish uchun so'z kiriting. Masalan: /del non")
-        return
-
-    word = args.lower().strip()
-    delete_word(word)
-    await message.reply(f"🗑 '{word}' so'zi ro'yxatdan o'chirildi.")
-
-@dp.message_handler(commands=['list'])
-async def list_all_words(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID):
-        return
-
-    words = get_words()
-    if words:
-        text = "📋 **Nazoratdagi so'zlar:**\n\n" + "\n".join(words)
-    else:
-        text = "Ro'yxat bo'sh."
-    await message.reply(text, parse_mode="Markdown")
-
-# --- GURUH XABARLARINI TEKSHIRISH ---
-
-@dp.message_handler(content_types=['text'])
-async def check_messages(message: types.Message):
-    # Agar xabar guruhdan bo'lsa
-    if message.chat.type in ['group', 'supergroup']:
-        text = message.text.lower()
-        words = get_words()
-        
-        found_word = None
-        for word in words:
-            # Oddiy qidiruv (so'z ichida bo'lsa ham topadi)
-            if word in text:
-                found_word = word
-                break
-        
-        if found_word:
-            user = message.from_user
-            chat = message.chat
-            
-            # Xabar linkini yasash (superguruhlar uchun)
-            msg_link = f"https://t.me/c/{str(chat.id)[4:]}/{message.message_id}"
-            
-            report = (
-                f"🚨 **Diqqat! Taqiqlangan so'z topildi.**\n\n"
-                f"🗝 **So'z:** {found_word}\n"
-                f"👤 **Foydalanuvchi:** {user.full_name}\n"
-                f"🆔 **ID:** `{user.id}`\n"
-                f"📧 **Username:** @{user.username if user.username else 'Yo\'q'}\n"
-                f"📍 **Guruh:** {chat.title}\n\n"
-                f"📄 **Xabar matni:**\n{message.text}\n\n"
-                f"🔗 [Xabarga o'tish]({msg_link})"
-            )
-            
-            # Adminga xabar yuborish
-            try:
-                await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="Markdown")
-            except Exception as e:
-                print(f"Adminga yuborishda xatolik: {e}")
-
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
-
-# --- Admin Buyruqlari (Guruhda) ---
-
-@dp.message_handler(Command('start', prefixes=['/']))
-async def send_welcome(message: types.Message):
-    """/start buyrug'ini ushlaydi."""
-    await message.reply("Salom! Men guruhdagi maxsus so'zlarni kuzatuvchi botman. Faqat adminlar foydalana oladigan buyruqlar: /addword, /listwords, /delword.")
-
-@dp.message_handler(Command('addword', prefixes=['/']))
-async def add_word_command(message: types.Message):
-    """/addword <so'z> - Yangi maxsus so'z qo'shish."""
-    if str(message.from_user.id) != ADMIN_ID:
-        await message.reply("Kechirasiz, bu buyruq faqat bot admini uchun.")
-        return
-
-    args = message.get_args().strip()
-    if not args:
-        await message.reply("Qo'shiladigan so'zni kiriting. Format: `/addword <so'z>`")
-        return
-
-    word_to_add = args.split()[0].lower() # Faqat birinchi so'zni olamiz
-    if add_word_to_db(word_to_add):
-        await message.reply(f"✅ Maxsus so'z qo'shildi: **{word_to_add}**")
-    else:
-        await message.reply(f"❌ So'z allaqachon mavjud: **{word_to_add}**")
-
-@dp.message_handler(Command('listwords', prefixes=['/']))
-async def list_words_command(message: types.Message):
-    """/listwords - Barcha maxsus so'zlar ro'yxatini ko'rish."""
-    if str(message.from_user.id) != ADMIN_ID:
-        await message.reply("Kechirasiz, bu buyruq faqat bot admini uchun.")
-        return
-
-    words = get_all_words()
-    if words:
-        word_list = "\n".join([f"* {w}" for w in words])
-        await message.reply(f"📝 **Kuzatilayotgan maxsus so'zlar ro'yxati:**\n\n{word_list}")
-    else:
-        await message.reply("Ro'yxat bo'sh. Hech qanday maxsus so'z kuzatilmayapti.")
-
-@dp.message_handler(Command('delword', prefixes=['/']))
-async def del_word_command(message: types.Message):
-    """/delword <so'z> - Maxsus so'zni o'chirish."""
-    if str(message.from_user.id) != ADMIN_ID:
-        await message.reply("Kechirasiz, bu buyruq faqat bot admini uchun.")
-        return
-
-    args = message.get_args().strip()
-    if not args:
-        await message.reply("O'chiriladigan so'zni kiriting. Format: `/delword <so'z>`")
-        return
-
-    word_to_remove = args.split()[0].lower()
-    if remove_word_from_db(word_to_remove):
-        await message.reply(f"🗑️ Maxsus so'z o'chirildi: **{word_to_remove}**")
-    else:
-        await message.reply(f"❌ So'z ro'yxatda mavjud emas: **{word_to_remove}**")
-
-
-# --- Xabarlarni Kuzatish Mantiqi (Guruhdagi har bir xabar uchun) ---
-
-@dp.message_handler(content_types=types.ContentType.TEXT)
-async def monitor_messages(message: types.Message):
-    """Guruhdagi har bir matnli xabarni tekshiradi."""
+    text_to_check = (message.text or message.caption or "").lower()
     
-    # Guruhda ekanligiga ishonch hosil qilish
-    if message.chat.type in [types.ChatType.GROUP, types.ChatType.SUPERGROUP]:
+    found_word = None
+    for word in MONITORED_KEYWORDS:
+        # So'zni butun so'z sifatida yoki matnning bir qismi sifatida qidirish
+        # Hozircha oddiy qidiruvni ishlatamiz, chunki foydalanuvchi butun so'z talabini aytmadi.
+        if word in text_to_check:
+            found_word = word
+            break
+
+    if found_word and ADMIN_ID:
+        user = message.from_user
+        chat = message.chat
         
-        message_text = message.text.lower()
-        monitored_words = get_all_words()
+        # Xabar yuboruvchi ma'lumotlari
+        user_info = (
+            f"Foydalanuvchi ID: {hcode(user.id)}\n"
+            f"Username: @{user.username}" if user.username else f"Username: Mavjud emas\n"
+            f"To'liq ism: {hbold(user.full_name)}"
+        )
         
-        found_words = []
-        for word in monitored_words:
-            if word in message_text:
-                found_words.append(word)
+        # Guruh ma'lumotlari
+        chat_info = (
+            f"Guruh ID: {hcode(chat.id)}\n"
+            f"Guruh nomi: {hbold(chat.title)}"
+        )
         
-        if found_words:
-            # So'z topildi, adminni xabardor qilish
-            
-            # Xabar muallifi ma'lumotlari
-            user = message.from_user
-            username = f"@{user.username}" if user.username else "mavjud emas"
-            full_name = user.full_name
-            user_id = user.id
-            
-            # Xabar yuborilgan guruh ma'lumotlari
-            chat_title = message.chat.title
-            
-            # Xabarni admin uchun formatlash
-            report_message = (
-                "🚨 **Maxsus so'z topildi!** 🚨\n\n"
-                f"**Guruh:** {chat_title}\n"
-                f"**Topilgan so'z(lar):** {', '.join(found_words)}\n"
-                f"**Yozuvchi:** [{full_name}](tg://user?id={user_id})\n"
-                f"**Username:** `{username}`\n"
-                f"**User ID:** `{user_id}`\n\n"
-                f"**Original xabar:**\n"
-                "> {message.text}"
-            )
-
-            try:
-                # Xabarni adminda yuborish
-                await bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=report_message,
-                    parse_mode=types.ParseMode.MARKDOWN,
-                    disable_web_page_preview=True
-                )
-                
-                # Agar admin xohlasa, original xabarga link ham yuborish mumkin
-                message_link = f"https://t.me/c/{str(message.chat.id)[4:]}/{message.message_id}"
-                await bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"[Original xabarga o'tish]({message_link})",
-                    parse_mode=types.ParseMode.MARKDOWN
-                )
-                
-            except Exception as e:
-                logging.error(f"Adminga xabar yuborishda xato: {e}")
+        # Adminga yuboriladigan xabar matni
+        report_text = (
+            f"{hbold('!!! MAXSUS SO\'Z TOPILDI !!!')}\n\n"
+            f"Topilgan so'z: {hbold(found_word)}\n\n"
+            f"{chat_info}\n\n"
+            f"{user_info}\n\n"
+            f"{hbold('Asl xabar:')}"
+        )
+        
+        # Adminga xabar yuborish
+        try:
+            await bot.send_message(ADMIN_ID, report_text)
+            # Asl xabarni adminga forward qilish
+            await message.forward(ADMIN_ID)
+            logger.info(f"Kalit so'z topildi: '{found_word}'. Xabar adminga ({ADMIN_ID}) yuborildi.")
+        except Exception as e:
+            logger.error(f"Adminga xabar yuborishda xato: {e}")
 
 
-# --- Asosiy ishga tushirish qismi ---
+async def main() -> None:
+    """Botni ishga tushirish."""
+    global dp
+    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+    dp = Dispatcher()
+    
+    # Handlerlarni ro'yxatdan o'tkazish
+    dp.message.register(command_start_handler, CommandStart())
+    dp.message.register(add_word_handler, Command("add_word"))
+    dp.message.register(remove_word_handler, Command("remove_word"))
+    dp.message.register(list_words_handler, Command("list_words"))
+    dp.message.register(monitor_messages, F.text | F.caption) # Matnli yoki sarlavhali xabarlarni kuzatish
 
-if __name__ == '__main__':
-    if not API_TOKEN or not ADMIN_ID:
-        logging.error("BOT_TOKEN va ADMIN_ID muhit o'zgaruvchilari o'rnatilmagan.")
-    else:
-        init_db() # DB ni ishga tushirish
-        logging.info("Bot ishga tushirildi.")
-        # Botni ishga tushirish (uzoq so'rovlar rejimida)
-        executor.start_polling(dp, skip_updates=True)
+    # Botni ishga tushirish
+    await dp.start_polling(bot)
 
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
