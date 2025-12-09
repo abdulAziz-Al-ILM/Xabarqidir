@@ -1,20 +1,20 @@
-# Rasmiy Python asosiy tasviridan foydalanish
+# Asosiy Python 3.11 rasmini tanlash
 FROM python:3.11-slim
 
-# Ishchi katalog o'rnatish
-WORKDIR /usr/src/app
+# Ish katalogini o'rnatish
+WORKDIR /app
 
-# Kodni nusxalashdan oldin keshni yangilash
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Kerakli paketlar
-    && rm -rf /var/lib/apt/lists/*
-
-# Talablar faylini nusxalash va bog'liqliklarni o'rnatish
+# Dependency faylini nusxalash va kutubxonalarni o'rnatish
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Loyiha fayllarini nusxalash
+# Barcha bot kodlarini konteynerga nusxalash
 COPY . .
 
-# Botni ishga tushirish
+# Bot ishlaydigan portni ochish (Telegram Webhook uchun)
+# PORT environment variable orqali aniqlanadi, lekin Dockerfile'da ta'riflash yaxshi amaliyot
+EXPOSE 8080
+
+# Botni ishga tushirish buyrug'i
+# Agar WEBHOOK_URL environment variable'i berilgan bo'lsa, main.py uni ishlatadi.
 CMD ["python", "main.py"]
