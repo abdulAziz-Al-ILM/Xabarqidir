@@ -1,20 +1,15 @@
-# Asosiy Python 3.11 rasmini tanlash
-FROM python:3.11-slim
+# Dockerfile
+FROM python:3.12-slim
 
-# Ish katalogini o'rnatish
 WORKDIR /app
 
-# Dependency faylini nusxalash va kutubxonalarni o'rnatish
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Barcha bot kodlarini konteynerga nusxalash
-COPY . .
+COPY main.py .
+COPY keywords.txt .  # If exists, otherwise it will be created
 
-# Bot ishlaydigan portni ochish (Telegram Webhook uchun)
-# PORT environment variable orqali aniqlanadi, lekin Dockerfile'da ta'riflash yaxshi amaliyot
-EXPOSE 8080
+ENV TELEGRAM_TOKEN=your_token_here
+ENV ADMIN_ID=your_admin_id_here
 
-# Botni ishga tushirish buyrug'i
-# Agar WEBHOOK_URL environment variable'i berilgan bo'lsa, main.py uni ishlatadi.
 CMD ["python", "main.py"]
