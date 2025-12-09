@@ -1,14 +1,20 @@
-FROM python:3.9-slim
+# Rasmiy Python asosiy tasviridan foydalanish
+FROM python:3.11-slim
 
-# Ishchi papkani belgilash
-WORKDIR /app
+# Ishchi katalog o'rnatish
+WORKDIR /usr/src/app
 
-# Kerakli fayllarni nusxalash
+# Kodni nusxalashdan oldin keshni yangilash
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Kerakli paketlar
+    && rm -rf /var/lib/apt/lists/*
+
+# Talablar faylini nusxalash va bog'liqliklarni o'rnatish
 COPY requirements.txt .
-COPY main.py .
-
-# Kutubxonalarni o'rnatish
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Loyiha fayllarini nusxalash
+COPY . .
 
 # Botni ishga tushirish
 CMD ["python", "main.py"]
