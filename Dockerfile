@@ -1,16 +1,14 @@
-# Rasmiy Python asosiy rasmini ishlatish
-FROM python:3.10-slim
+FROM python:3.9-slim
 
-# Ishchi katalog o'rnatish
+# Ishchi papkani belgilash
 WORKDIR /app
 
-# Talab qilinadigan kutubxonalarni nusxalash va o'rnatish
+# Kerakli fayllarni nusxalash
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Bot kodini nusxalash
 COPY main.py .
 
+# Kutubxonalarni o'rnatish
+RUN pip install --no-cache-dir -r requirements.txt
+
 # Botni ishga tushirish
-# BOT_TOKEN va ADMIN_ID muhit o'zgaruvchilari Railway'da o'rnatilishi kerak
 CMD ["python", "main.py"]
