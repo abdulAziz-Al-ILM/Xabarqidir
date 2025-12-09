@@ -4,10 +4,11 @@ import os
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
-# --- SOZLAMALAR ---
+# --- KONFIGURATSIYA ---
 # Railway Environment Variables dan o'qib oladi
+# BOT_TOKEN va ADMIN_ID ni Railway'da o'rnatish shart!
 API_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")  # Sizning ID raqamingiz (string ko'rinishida kelishi mumkin)
+ADMIN_ID = os.getenv("ADMIN_ID") 
 
 # Loglarni yoqish
 logging.basicConfig(level=logging.INFO)
@@ -16,8 +17,10 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# --- BAZA BILAN ISHLASH (SQLite) ---
+# --- MA'LUMOTLAR BAZASI (SQLite) ---
+
 def db_connect():
+    """DB bilan ulanishni o'rnatadi va jadvalni yaratadi."""
     conn = sqlite3.connect("words.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -29,6 +32,7 @@ def db_connect():
     return conn
 
 def add_word(word):
+    """Yangi so'zni bazaga qo'shadi."""
     conn = db_connect()
     cursor = conn.cursor()
     try:
@@ -36,11 +40,12 @@ def add_word(word):
         conn.commit()
         status = True
     except sqlite3.IntegrityError:
-        status = False
+        status = False # So'z allaqachon mavjud
     conn.close()
     return status
 
 def get_words():
+    """Barcha nazorat so'zlarini oladi."""
     conn = db_connect()
     cursor = conn.cursor()
     cursor.execute("SELECT word FROM bad_words")
@@ -49,20 +54,116 @@ def get_words():
     return words
 
 def delete_word(word):
+    """So'zni bazadan o'chiradi."""
     conn = db_connect()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM bad_words WHERE word = ?", (word.lower(),))
+    deleted_count = cursor.rowcount
     conn.commit()
     conn.close()
+    return deleted_count > 0
 
 # --- ADMIN BUYRUQLARI ---
 
 @dp.message_handler(commands=['start', 'help'])
 async def send_welcome(message: types.Message):
-    await message.reply("Salom! Men guruhdagi so'zlarni nazorat qiluvchi botman.\n"
-                        "Buyruqlar (faqat admin uchun):\n"
+    await message.reply("Salom! Men guruhdagi so'zlarni nazorat qiluvchi botman. \n"
+                        "Buyruqlar (faqat admin ID si uchun):\n"
                         "/add <so'z> - So'z qo'shish\n"
                         "/del <so'z> - So'zni o'chirish\n"
+                        "/list - Ro'yxatni ko'rish")
+
+@dp.message_handler(commands=['add'])
+async def add_new_word(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+    args = message.get_args()
+    if not args:
+        await message.reply("Qo'shiladigan so'zni kiriting. Masalan: `/add non`")
+        return
+    word = args.lower().strip()
+    if add_word(word):
+        await message.reply(f"✅ **'{word}'** so'zi nazorat ro'yxatiga qo'shildi.")
+    else:
+        await message.reply(f"⚠️ **'{word}'** so'zi allaqachon mavjud.")
+
+@dp.message_handler(commands=['del'])
+async def remove_existing_word(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+    args = message.get_args()
+    if not args:
+        await message.reply("O'chirish uchun so'z kiriting. Masalan: `/del non`")
+        return
+    word = args.lower().strip()
+    if delete_word(word):
+        await message.reply(f"🗑 **'{word}'** so'zi ro'yxatdan o'chirildi.")
+    else:
+        await message.reply(f"❌ **'{word}'** so'zi ro'yxatda topilmadi.")
+
+@dp.message_handler(commands=['list'])
+async def list_all_words(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+    words = get_words()
+    if words:
+        word_list = "\n".join([f"• {w}" for w in words])
+        text = f"📋 **Nazoratdagi so'zlar:**\n\n{word_list}"
+    else:
+        text = "Ro'yxat bo'sh. Hech qanday so'z nazorat qilinmayapti."
+    await message.reply(text, parse_mode="Markdown")
+
+# --- XABARLARNI KUZATISH MANTIQI (TUZAILGAN QISM) ---
+
+@dp.message_handler(content_types=['text'])
+async def check_messages(message: types.Message):
+    if message.chat.type in ['group', 'supergroup']:
+        text = message.text.lower()
+        words = get_words()
+        
+        found_words = [word for word in words if word in text]
+        
+        if found_words:
+            user = message.from_user
+            chat = message.chat
+            
+            # Xatolikni bartaraf etish uchun username ni alohida aniqlash
+            username_text = f"@{user.username}" if user.username else "Mavjud emas"
+            
+            # Xabar linkini yasash (superguruhlar uchun)
+            # chat.id manfiy son bo'ladi, boshidagi "-100" qismini olib tashlash kerak
+            msg_link = f"https://t.me/c/{str(chat.id)[4:]}/{message.message_id}"
+            
+            report = (
+                f"🚨 **Diqqat! Taqiqlangan so'z topildi.** 🚨\n\n"
+                f"🗝 **Topilgan so'z(lar):** {', '.join(found_words)}\n"
+                f"👤 **Foydalanuvchi:** [{user.full_name}](tg://user?id={user.id})\n"
+                f"🆔 **ID:** `{user.id}`\n"
+                f"📧 **Username:** {username_text}\n"
+                f"📍 **Guruh:** {chat.title}\n\n"
+                f"📄 **Xabar matni:**\n`{message.text}`\n\n"
+                f"🔗 [Original xabarga o'tish]({msg_link})"
+            )
+            
+            try:
+                # Adminga xabar yuborish
+                await bot.send_message(
+                    chat_id=ADMIN_ID, 
+                    text=report, 
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                logging.error(f"Adminga xabar yuborishda xatolik: {e}")
+
+if __name__ == '__main__':
+    if not API_TOKEN or not ADMIN_ID:
+        logging.error("BOT_TOKEN va ADMIN_ID muhit o'zgaruvchilari Railway'da o'rnatilmagan.")
+    else:
+        db_connect() # Baza ishga tushirildi
+        logging.info("Bot ishga tushirildi.")
+        executor.start_polling(dp, skip_updates=True)
+
                         "/list - Ro'yxatni ko'rish")
 
 @dp.message_handler(commands=['add'])
